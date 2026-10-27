@@ -1,0 +1,557 @@
+<title>Ping Pong Practice Machine 3D</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+html,body{height:100%;margin:0;overflow:hidden;background:#0d1117}
+.app{display:flex;height:100%;color:#e6edf3;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+aside{width:300px;flex:none;background:#161b22;border-right:1px solid #30363d;overflow:auto;padding:14px 16px;box-sizing:border-box}
+main{flex:1;position:relative;min-width:0}
+h1{font-size:17px;margin:0 0 2px}
+.sub{color:#8b949e;font-size:12px;margin:0 0 12px}
+h2{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8b949e;margin:16px 0 6px}
+.row{display:flex;align-items:center;gap:8px;padding:4px 0}
+.row button.name{flex:1;text-align:left;background:none;border:0;color:#e6edf3;font:inherit;padding:4px 6px;border-radius:6px;cursor:pointer}
+.row button.name:hover{background:#21262d}
+.row button.name[aria-pressed="true"]{background:#1f2a3a;color:#fff;font-weight:600}
+.row input{accent-color:#58a6ff}
+.owner{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.btns{display:flex;gap:8px;margin:8px 0}
+.btn{flex:1;font:inherit;padding:8px;border-radius:8px;border:1px solid #30363d;background:#21262d;color:#e6edf3;cursor:pointer}
+.btn.go{background:#1f6f43;border-color:#2ea043}
+.btn.stop{background:#6e2a2a;border-color:#da3633}
+.btn:focus-visible,.row button:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+#status{font-size:13px;color:#8b949e}
+#details{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;margin-top:6px;font-size:13px}
+#details h3{margin:0 0 4px;font-size:14px}
+#details .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid #30363d;color:#8b949e;margin:4px 0}
+#details .open{color:#d29922}
+.foot{font-size:11px;color:#6e7681;margin-top:14px}
+#view{position:absolute;inset:0;cursor:grab}
+#view.dragging{cursor:grabbing}
+#noglx{position:absolute;inset:0;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:#8b949e}
+@media (max-width:700px){
+  .app{flex-direction:column}
+  aside{width:auto;max-height:45%;border-right:0;border-bottom:1px solid #30363d}
+}
+</style>
+
+<div class="app">
+  <aside>
+    <h1>Ping Pong Practice Machine</h1>
+    <p class="sub">Illustrative 3D layout. Click a name to highlight it, or use the checkbox to hide it.</p>
+
+    <div class="btns">
+      <button class="btn go" id="startBtn" type="button">Start round</button>
+      <button class="btn stop" id="stopBtn" type="button">Stop</button>
+    </div>
+    <p id="status">Idle. Time 30 s.</p>
+
+    <div id="list"></div>
+    <div id="details"><h3>Select a part</h3><p>Click a component in the list or the 3D view.</p></div>
+    <p class="foot">Illustrative layout, not to scale. Nothing here is built or tested yet. Open items are marked in each part's details.</p>
+  </aside>
+  <main>
+    <div id="view"></div>
+    <div id="noglx">The 3D view could not load its library from the CDN. The parts list still works.</div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+const OWNERS = {
+  oscar:  {label:'Oscar Reyes: launcher and aiming', c:'#3DADFF'},
+  zoe:    {label:'Zoe Gonzalez: player detection and targeting', c:'#A371F7'},
+  jason:  {label:'Jason Juarez: feeding and return counting', c:'#FF9E42'},
+  carlos: {label:'Carlos Rojas: UI, round control, and power', c:'#56D364'},
+  team:   {label:'Shared or not yet assigned', c:'#B3B3B3'}
+};
+
+// ---------- parts registry and sidebar (works even if 3D fails) ----------
+const partGroups = [];
+const byId = {};
+let selectedId = null;
+
+const SECTIONS = [
+  {title:'Frame and structure', ids:['table','net','funnel','sleeve']},
+  {title:'Launcher and motion', ids:['launchTube','flywheels','tiltServo','panServo','feederServo','boardA']},
+  {title:'Player sensing and UI', ids:['boardB','tof','zone','lcd','buttons','irSensor']},
+  {title:'Power and wiring', ids:['powerBank','wiring']}
+];
+
+const statusEl = document.getElementById('status');
+const detailsEl = document.getElementById('details');
+const listEl = document.getElementById('list');
+
+function setHighlight(g, on){
+  g.traverse(o => {
+    if (o.isMesh && o.material && o.material.emissive){
+      o.material.emissive.setHex(on ? 0x2d2a0a : (o.material.userData.base || 0));
+    }
+  });
+}
+
+function select(id){
+  if (selectedId && byId[selectedId]) setHighlight(byId[selectedId], false);
+  selectedId = id;
+  document.querySelectorAll('button.name').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
+  if (!id){
+    detailsEl.innerHTML = '<h3>Select a part</h3><p>Click a component in the list or the 3D view.</p>';
+    return;
+  }
+  const g = byId[id];
+  if (!g) return;
+  setHighlight(g, true);
+  const d = g.userData;
+  detailsEl.innerHTML = '';
+  const h = document.createElement('h3'); h.textContent = d.name;
+  const own = document.createElement('div'); own.className = 'tag'; own.textContent = OWNERS[d.owner].label;
+  const st = document.createElement('div'); st.className = 'tag'; st.textContent = 'Not built yet';
+  const note = document.createElement('p'); note.textContent = d.note;
+  const open = document.createElement('p'); open.className = 'open'; open.textContent = 'Open: ' + d.open;
+  detailsEl.append(h, own, st, note, open);
+}
+
+function buildList(){
+  for (const sec of SECTIONS){
+    const h = document.createElement('h2'); h.textContent = sec.title;
+    listEl.appendChild(h);
+    for (const id of sec.ids){
+      const g = byId[id];
+      if (!g) continue;
+      const row = document.createElement('div'); row.className = 'row';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true;
+      cb.title = 'Show or hide';
+      cb.setAttribute('aria-label', 'Show ' + g.userData.name);
+      cb.addEventListener('change', () => { g.visible = cb.checked; });
+      const dot = document.createElement('span'); dot.className = 'owner';
+      dot.style.background = OWNERS[g.userData.owner].c;
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'name'; btn.dataset.id = id;
+      btn.textContent = g.userData.name;
+      btn.setAttribute('aria-pressed', 'false');
+      btn.addEventListener('click', () => select(selectedId === id ? null : id));
+      row.append(cb, dot, btn);
+      listEl.appendChild(row);
+    }
+  }
+}
+
+document.getElementById('startBtn').addEventListener('click', () => window.startRound && window.startRound());
+document.getElementById('stopBtn').addEventListener('click', () => window.stopRound && window.stopRound());
+
+function makePart(id, name, owner, note, open, parent){
+  const g = new THREE.Group();
+  g.name = id;
+  g.userData = {id, name, owner, note, open};
+  parent.add(g);
+  partGroups.push(g);
+  byId[id] = g;
+  return g;
+}
+
+// ---------- 3D scene (only if Three.js loaded) ----------
+function showErr(msg){
+  const el = document.getElementById('noglx');
+  el.style.display = 'flex';
+  el.textContent = msg;
+}
+
+
+function buildSidebarDetails(){
+  // Parts are built in buildScene; without 3D there is nothing to list.
+  listEl.innerHTML = '<p class="foot">No parts to list because the 3D library did not load.</p>';
+}
+
+function mat(color, o = {}){
+  const m = new THREE.MeshStandardMaterial({
+    color, roughness: o.r !== undefined ? o.r : 0.55, metalness: o.m !== undefined ? o.m : 0.1,
+    transparent: !!o.t, opacity: o.op !== undefined ? o.op : 1,
+    side: o.side !== undefined ? o.side : THREE.FrontSide,
+    emissive: o.e !== undefined ? o.e : 0x000000
+  });
+  m.userData.base = m.emissive.getHex();
+  return m;
+}
+function add(parent, geo, material, x, y, z){
+  const m = new THREE.Mesh(geo, material);
+  m.position.set(x || 0, y || 0, z || 0);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+function tube(points, color){
+  const curve = new THREE.CatmullRomCurve3(points.map(p => new THREE.Vector3(p[0], p[1], p[2])));
+  const geo = new THREE.TubeGeometry(curve, 80, 0.0028, 8);
+  const m = new THREE.Mesh(geo, mat(color, {r:0.4}));
+  m.castShadow = true;
+  return m;
+}
+function textureFrom(w, h, draw){
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  draw(ctx, w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
+const COL = {
+  table: 0x1d6b57, leg: 0x4a5058, pcb: 0x1f8a3a, chip: 0xc0c4cc, black: 0x14161a,
+  metal: 0x9aa0a8, wheel: 0x111111, motor: 0x8b9199, sleeve: 0x2b2f36,
+  sensor: 0x262a31, lcdBack: 0x0b0d10, pbank: 0x1c1f24,
+  red: 0xe53935, blk: 0x101010, yel: 0xfdd835
+};
+
+function buildScene(){
+  const view = document.getElementById('view');
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d1117);
+
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 50);
+  camera.position.set(1.7, 1.35, 1.9);
+
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  view.appendChild(renderer.domElement);
+
+  // Minimal orbit controls: drag to rotate, right-drag or shift-drag to pan, wheel to zoom.
+  const target = new THREE.Vector3(0, 0.7, 0);
+  const off0 = camera.position.clone().sub(target);
+  const orb = {r: off0.length(), th: Math.atan2(off0.x, off0.z), ph: Math.acos(off0.y / off0.length())};
+  let orbDrag = null;
+  renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+  renderer.domElement.addEventListener('pointerdown', e => {
+    orbDrag = {x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey, moved: 0};
+  });
+  window.addEventListener('pointermove', e => {
+    if (!orbDrag) return;
+    const dx = e.clientX - orbDrag.x, dy = e.clientY - orbDrag.y;
+    orbDrag.x = e.clientX; orbDrag.y = e.clientY;
+    if (orbDrag.pan){
+      target.x -= dx * 0.002 * orb.r * Math.cos(orb.th) + dy * 0.002 * orb.r * Math.sin(orb.th);
+      target.z += dx * 0.002 * orb.r * Math.sin(orb.th) - dy * 0.002 * orb.r * Math.cos(orb.th);
+    } else {
+      orb.th -= dx * 0.005;
+      orb.ph = Math.min(1.5, Math.max(0.1, orb.ph - dy * 0.005));
+    }
+  });
+  window.addEventListener('pointerup', () => { orbDrag = null; });
+  renderer.domElement.addEventListener('wheel', e => {
+    e.preventDefault();
+    orb.r = Math.min(6, Math.max(0.6, orb.r * (1 + e.deltaY * 0.001)));
+  }, {passive: false});
+  const controls = {
+    update(){
+      camera.position.set(
+        target.x + orb.r * Math.sin(orb.ph) * Math.sin(orb.th),
+        target.y + orb.r * Math.cos(orb.ph),
+        target.z + orb.r * Math.sin(orb.ph) * Math.cos(orb.th));
+      camera.lookAt(target);
+    }
+  };
+  controls.update();
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+  sun.position.set(1.5, 2.5, 1.2);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -1.6; sun.shadow.camera.right = 1.6;
+  sun.shadow.camera.top = 1.6; sun.shadow.camera.bottom = -1.6;
+  sun.shadow.camera.near = 0.1; sun.shadow.camera.far = 8;
+  sun.shadow.bias = -0.0005;
+  scene.add(sun);
+
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), new THREE.ShadowMaterial({opacity: 0.35}));
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+  const grid = new THREE.GridHelper(4, 40, 0x3b4252, 0x21262d);
+  grid.position.y = 0.001;
+  scene.add(grid);
+
+  // Frame and structure
+  const frame = new THREE.Group();
+  scene.add(frame);
+
+  const tableG = makePart('table', 'Folding table (1.83 m)', 'team',
+    'Proposed 1.83 m by 0.76 m folding table. Net, funnel, launcher, and player zone are placed on it.',
+    'Dimensions to be measured on the real table.', frame);
+  add(tableG, new THREE.BoxGeometry(1.83, 0.03, 0.76), mat(COL.table, {r:0.7}), 0, 0.745, 0);
+  const legs = [[-0.8,-0.32],[-0.8,0.32],[0.8,-0.32],[0.8,0.32]];
+  for (const l of legs) add(tableG, new THREE.CylinderGeometry(0.025, 0.025, 0.74, 16), mat(COL.leg, {m:0.5}), l[0], 0.37, l[1]);
+  add(tableG, new THREE.BoxGeometry(0.004, 0.001, 0.76), mat(0xffffff), 0, 0.7625, 0);
+
+  const meshTex = textureFrom(128, 128, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 3;
+    for (let i = 0; i <= w; i += 16){
+      ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(w, i); ctx.stroke();
+    }
+  });
+  const netMat = new THREE.MeshStandardMaterial({map: meshTex, transparent: true, opacity: 0.45,
+    side: THREE.DoubleSide, depthWrite: false});
+  netMat.userData.base = 0;
+  const netG = makePart('net', 'Backstop net', 'team',
+    'Full-width stationary backstop with side wings, at the launcher end of the table. Catches returns and feeds the funnel.',
+    'Frame and clamp design not finalized.', frame);
+  const netPlane = new THREE.Mesh(new THREE.PlaneGeometry(0.76, 0.6), netMat);
+  netPlane.position.set(0.93, 1.062, 0);
+  netPlane.rotation.y = -Math.PI / 2;
+  netG.add(netPlane);
+  for (const z of [-0.38, 0.38]){
+    const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.3), netMat);
+    wing.position.set(0.78, 0.912, z);
+    netG.add(wing);
+  }
+
+  const funnelG = makePart('funnel', 'Funnel and apron', 'jason',
+    'Sloped apron drains returned balls into a central funnel.',
+    'Apron slope and funnel size not measured.', frame);
+  const apron = add(funnelG, new THREE.BoxGeometry(0.32, 0.004, 0.76), mat(0x3a4150, {r:0.7}), 0.75, 0.775, 0);
+  apron.rotation.z = 0.12;
+  const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.02, 0.12, 32, 1, true),
+    mat(0x9fb6c9, {t:true, op:0.6, side:THREE.DoubleSide, r:0.3}));
+  cone.position.set(0.75, 0.84, 0);
+  cone.castShadow = true;
+  funnelG.add(cone);
+
+  const sleeveG = makePart('sleeve', 'Feed sleeve', 'jason',
+    'Short flexible sleeve from the funnel to the feeder gate.',
+    'Sleeve material and length TBD. It must allow pan and tilt without pinching balls.', frame);
+  sleeveG.add(tube([[0.75,0.78,0],[0.72,0.77,-0.05],[0.68,0.79,-0.1],[0.66,0.8,-0.12]], COL.sleeve));
+
+  // Launcher and motion. The pan pivot is the aim group; aimed parts use local coordinates.
+  const motion = new THREE.Group();
+  scene.add(motion);
+  const PIVOT = {x:0.62, y:0.762, z:-0.2};
+  const aim = new THREE.Group();
+  aim.position.set(PIVOT.x, PIVOT.y, PIVOT.z);
+  motion.add(aim);
+
+  const boardAG = makePart('boardA', 'Board A (launcher MSPM0)', 'oscar',
+    'Motor PWM through MOSFETs, servo pulses through a level buffer, and feeder timing.',
+    'Pin map not finalized.', motion);
+  add(boardAG, new THREE.BoxGeometry(0.07, 0.0016, 0.05), mat(COL.pcb, {r:0.8}), 0.45, 0.7628, -0.2);
+  add(boardAG, new THREE.BoxGeometry(0.014, 0.003, 0.014), mat(COL.chip, {m:0.6, r:0.3}), 0.45, 0.7652, -0.2);
+  add(boardAG, new THREE.SphereGeometry(0.0016, 10, 8), mat(0xff2a2a, {e:0xff2a2a}), 0.42, 0.7644, -0.215);
+  for (const z of [-0.222, -0.178]) add(boardAG, new THREE.BoxGeometry(0.05, 0.004, 0.002), mat(COL.black), 0.45, 0.764, z);
+  for (const z of [-0.23, -0.17]) add(boardAG, new THREE.BoxGeometry(0.006, 0.004, 0.005), mat(COL.black), 0.5, 0.7662, z);
+  add(boardAG, new THREE.BoxGeometry(0.02, 0.006, 0.008), mat(COL.black), 0.4, 0.7666, -0.17);
+
+  const launchTubeG = makePart('launchTube', 'Launch tube', 'oscar',
+    'Short tube where balls exit toward the player. Pans with the pan servo.',
+    'Tube length and bore not measured.', aim);
+  const tubeGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.2, 24);
+  tubeGeo.rotateZ(Math.PI / 2);
+  add(launchTubeG, tubeGeo, mat(0xbfc7d1, {t:true, op:0.75, r:0.3}), 0, 0.06, 0);
+
+  const flywheelG = makePart('flywheels', 'Flywheels and DC motors (x2)', 'oscar',
+    'Two brushed DC motors (Adafruit 711, 2 mm shafts) spin grippy wheels to launch balls. Driven by two MOSFET channels with flyback diodes.',
+    'Wheel-to-shaft adapter not designed. Launch speed at 5 V not measured.', aim);
+  const wheelGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.012, 32);
+  wheelGeo.rotateX(Math.PI / 2);
+  const motorGeo = new THREE.CylinderGeometry(0.0135, 0.0135, 0.027, 20);
+  motorGeo.rotateX(Math.PI / 2);
+  const wheels = [];
+  for (const z of [-0.05, 0.05]){
+    wheels.push(add(flywheelG, wheelGeo, mat(COL.wheel, {r:0.9}), -0.09, 0.06, z));
+    add(flywheelG, motorGeo, mat(COL.motor, {m:0.4}), -0.09, 0.06, z * 1.7);
+  }
+  for (const z of [-0.085, 0.085]){
+    flywheelG.add(tube([[-0.09, 0.06, z], [-0.05, 0.04, z * 0.7], [0, 0.01, z * 0.35]], COL.red));
+  }
+
+  const tiltG = makePart('tiltServo', 'Tilt servo', 'oscar',
+    'Tilts the launcher vertically within limits.',
+    'Same servo model question as the pan servo.', aim);
+  add(tiltG, new THREE.BoxGeometry(0.023, 0.032, 0.012), mat(0x1e3a5f, {r:0.5}), 0.06, 0.02, 0.04);
+
+  const panG = makePart('panServo', 'Pan servo', 'oscar',
+    'Pans the launcher left and right for calibrated table targets. Oscillates during a round.',
+    'Servo model TBD (SG92R in proposal, DFRobot SER0039 in latest handoff).', motion);
+  add(panG, new THREE.BoxGeometry(0.023, 0.03, 0.012), mat(0x1e3a5f, {r:0.5}), PIVOT.x, PIVOT.y + 0.015, PIVOT.z);
+
+  const feederG = makePart('feederServo', 'Feeder gate servo', 'jason',
+    'Timed one-ball gate. No feeder-ready or launch-confirmation sensor, per the latest handoff.',
+    'Gate design not built.', motion);
+  add(feederG, new THREE.BoxGeometry(0.023, 0.03, 0.012), mat(0x1e3a5f, {r:0.5}), 0.66, 0.79, -0.12);
+
+  const irG = makePart('irSensor', 'IR return sensor', 'jason',
+    'Break-beam pair across the funnel. Counts balls returned into the net.',
+    'Count and placement are open: two pairs in the proposal, one in the latest handoff.', motion);
+  add(irG, new THREE.BoxGeometry(0.012, 0.012, 0.008), mat(COL.black), 0.75, 0.84, -0.05);
+  add(irG, new THREE.BoxGeometry(0.012, 0.012, 0.008), mat(COL.black), 0.75, 0.84, 0.05);
+  const beam = add(irG, new THREE.CylinderGeometry(0.002, 0.002, 0.1, 8), mat(0xff3b30, {e:0xff3b30}), 0.75, 0.84, 0);
+  beam.rotation.x = Math.PI / 2;
+
+  // Player sensing and UI
+  const sensingG = new THREE.Group();
+  scene.add(sensingG);
+
+  const boardBG = makePart('boardB', 'Board B (sensing and UI MSPM0)', 'carlos',
+    'Reads the TF-Luna sensors and buttons, drives the LCD, and runs the round timer. Talks to Board A over UART.',
+    'UART baud rate and pin map TBD.', sensingG);
+  add(boardBG, new THREE.BoxGeometry(0.07, 0.0016, 0.05), mat(COL.pcb, {r:0.8}), -0.74, 0.7628, -0.15);
+  add(boardBG, new THREE.BoxGeometry(0.014, 0.003, 0.014), mat(COL.chip, {m:0.6, r:0.3}), -0.74, 0.7652, -0.15);
+  add(boardBG, new THREE.SphereGeometry(0.0016, 10, 8), mat(0xff2a2a, {e:0xff2a2a}), -0.77, 0.7644, -0.165);
+  for (const z of [-0.172, -0.128]) add(boardBG, new THREE.BoxGeometry(0.05, 0.004, 0.002), mat(COL.black), -0.74, 0.764, z);
+
+  const tofG = makePart('tof', 'TF-Luna sensors (x3)', 'zoe',
+    'Left, center, and right player position at the player edge.',
+    'Interface (UART or I2C) TBD. Lab-borrowed.', sensingG);
+  for (const z of [-0.2, 0, 0.2]){
+    add(tofG, new THREE.BoxGeometry(0.024, 0.012, 0.012), mat(COL.sensor, {r:0.4}), -0.88, 0.78, z);
+    const lens = add(tofG, new THREE.CylinderGeometry(0.003, 0.003, 0.004, 12), mat(0x3b6fb6, {e:0x0f2a55}), -0.9, 0.78, z);
+    lens.rotation.z = Math.PI / 2;
+    sensingG.add(tube([[-0.88, 0.775, z], [-0.82, 0.77, z * 0.8 - 0.15], [-0.74, 0.775, -0.15]], COL.yel));
+  }
+
+  const zoneTex = textureFrom(256, 256, (ctx, w, h) => {
+    ctx.fillStyle = 'rgba(137,87,229,0.18)'; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(190,160,255,0.95)'; ctx.lineWidth = 8;
+    ctx.setLineDash([22, 14]); ctx.strokeRect(10, 10, w - 20, h - 20);
+  });
+  const zoneG = makePart('zone', 'Player zone (taped)', 'zoe',
+    'Taped player-only area. Spectators outside the tape have not been tested.',
+    'Zone size to be verified on the real table.', sensingG);
+  const zoneMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.5),
+    new THREE.MeshStandardMaterial({map: zoneTex, transparent: true, depthWrite: false}));
+  zoneMesh.rotation.x = -Math.PI / 2;
+  zoneMesh.position.set(-0.45, 0.7625, 0);
+  zoneG.add(zoneMesh);
+
+  const lcdG = makePart('lcd', 'ST7735 LCD', 'carlos',
+    'Shows time left and returns during a round.',
+    'Lab module model and connector not confirmed.', sensingG);
+  const lcdCanvas = document.createElement('canvas');
+  lcdCanvas.width = 256; lcdCanvas.height = 192;
+  const lcdCtx = lcdCanvas.getContext('2d');
+  const lcdTex = new THREE.CanvasTexture(lcdCanvas);
+  lcdTex.encoding = THREE.sRGBEncoding;
+  const lcdScreen = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 0.03),
+    new THREE.MeshStandardMaterial({map: lcdTex, emissive: 0x2a8f4f, emissiveIntensity: 0.25, emissiveMap: lcdTex}));
+  lcdScreen.position.set(-0.74, 0.83, -0.045);
+  lcdScreen.rotation.y = -Math.PI / 2;
+  lcdG.add(lcdScreen);
+  add(lcdG, new THREE.BoxGeometry(0.005, 0.036, 0.05), mat(COL.lcdBack), -0.7425, 0.83, -0.045);
+
+  const btnG = makePart('buttons', 'Start and Stop buttons', 'carlos',
+    'Start begins a 30-second round. Stop inhibits feeding and turns off drive.',
+    'Button hardware from lab checkout TBD.', sensingG);
+  add(btnG, new THREE.CylinderGeometry(0.008, 0.008, 0.01, 20), mat(0xd1383c, {r:0.4}), -0.7, 0.767, -0.25);
+  add(btnG, new THREE.CylinderGeometry(0.008, 0.008, 0.01, 20), mat(0x6e7681, {r:0.4}), -0.67, 0.767, -0.25);
+
+  // Power and wiring
+  const powerG = makePart('powerBank', 'Power bank (5 V)', 'carlos',
+    'Anker A1695, 25,000 mAh, owned. Feeds 5 V to motors and servos and to the 3.3 V regulators on each board.',
+    'Confirm output current and protection under motor load.', sensingG);
+  add(powerG, new THREE.BoxGeometry(0.1, 0.02, 0.05), mat(COL.pbank, {r:0.5}), -0.2, 0.772, 0.28);
+  add(powerG, new THREE.BoxGeometry(0.06, 0.0015, 0.02), mat(0x56D364, {e:0x1f6f43}), -0.2, 0.7825, 0.28);
+
+  const wiringG = makePart('wiring', 'Wiring', 'carlos',
+    'Red 5 V, black ground, yellow signals. UART between boards, SPI to the LCD, and sensor leads.',
+    'Final wire gauges and connectors TBD.', scene);
+  wiringG.add(tube([[-0.2,0.79,0.28],[-0.1,0.79,0.2],[0.1,0.79,0.2],[0.3,0.79,0.1],[0.41,0.79,-0.1],[0.41,0.775,-0.2]], COL.red));
+  wiringG.add(tube([[-0.2,0.785,0.29],[-0.4,0.785,0.29],[-0.6,0.785,0.1],[-0.7,0.775,-0.15]], COL.blk));
+  wiringG.add(tube([[-0.7,0.785,-0.15],[-0.4,0.8,-0.16],[0,0.8,-0.14],[0.3,0.8,-0.16],[0.41,0.785,-0.16]], COL.yel));
+  wiringG.add(tube([[-0.74,0.775,-0.13],[-0.74,0.8,-0.09],[-0.74,0.82,-0.06]], COL.yel));
+  wiringG.add(tube([[0.45,0.775,-0.2],[0.52,0.775,-0.2],[0.62,0.78,-0.2]], COL.yel));
+  wiringG.add(tube([[0.45,0.775,-0.165],[0.56,0.79,-0.14],[0.66,0.79,-0.12]], COL.yel));
+
+  // Round state and LCD
+  let running = false, timeLeft = 30, returns = 0, tAcc = 0;
+  function drawLCD(){
+    const g = lcdCtx;
+    g.fillStyle = '#06140c'; g.fillRect(0, 0, 256, 192);
+    g.fillStyle = '#7CFC9A'; g.font = 'bold 28px monospace';
+    g.fillText('Time ' + timeLeft + ' s', 16, 60);
+    g.fillText('Returns ' + returns, 16, 110);
+    g.font = '18px monospace';
+    g.fillText(running ? 'ROUND RUNNING' : 'IDLE', 16, 160);
+    lcdTex.needsUpdate = true;
+  }
+  function updateStatus(){
+    statusEl.textContent = running ? ('Round running. ' + timeLeft + ' s left.') : 'Idle. Time 30 s.';
+  }
+  function startRound(){ if (running) return; running = true; timeLeft = 30; returns = 0; tAcc = 0; drawLCD(); updateStatus(); }
+  function stopRound(){ running = false; drawLCD(); updateStatus(); }
+  window.startRound = startRound;
+  window.stopRound = stopRound;
+  drawLCD();
+
+  buildList();
+  select(null);
+
+  // Click in the 3D view
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  let press = null;
+  renderer.domElement.addEventListener('pointerdown', e => { press = {x: e.clientX, y: e.clientY}; });
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (!press) return;
+    const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+    press = null;
+    if (moved > 5) return;
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hits = raycaster.intersectObjects(partGroups, true);
+    for (const h of hits){
+      let o = h.object;
+      while (o && !(o.userData && o.userData.id)) o = o.parent;
+      if (o && o.visible){ select(o.userData.id); return; }
+    }
+    select(null);
+  });
+
+  function resize(){
+    const w = view.clientWidth, h = view.clientHeight;
+    renderer.setSize(w, h, false);
+    renderer.domElement.style.width = w + 'px';
+    renderer.domElement.style.height = h + 'px';
+    camera.aspect = w / Math.max(h, 1);
+    camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(resize).observe(view);
+  resize();
+
+  const clock = new THREE.Clock();
+  function loop(){
+    const dt = Math.min(clock.getDelta(), 0.05);
+    const t = clock.getElapsedTime();
+    if (running){
+      for (const w of wheels) w.rotation.z += dt * 40;
+      tAcc += dt;
+      if (tAcc >= 1){
+        tAcc -= 1;
+        timeLeft -= 1;
+        if (timeLeft <= 0){ timeLeft = 0; stopRound(); }
+        else { drawLCD(); updateStatus(); }
+      }
+    }
+    const aimTarget = running ? Math.sin(t * 0.9) * 0.45 : 0;
+    aim.rotation.y += (aimTarget - aim.rotation.y) * Math.min(1, dt * 4);
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+try {
+  if (typeof THREE === 'undefined') throw new Error('Three.js did not load from the CDN.');
+  buildScene();
+} catch (err) {
+  console.error(err);
+  const stack = err && err.stack ? String(err.stack).split('\n').slice(0, 3).join(' | ') : '';
+  showErr('3D view error: ' + (err && err.message ? err.message : String(err)) + (stack ? ' [' + stack + ']' : ''));
+  statusEl.textContent = 'Parts list only: 3D view failed to start.';
+  buildSidebarDetails();
+}
+</script>
